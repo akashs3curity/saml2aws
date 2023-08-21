@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"encoding/base64"
+	"encoding/json"
+	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/pkg/errors"
@@ -41,17 +44,53 @@ func ExtractAWSAccounts(data []byte) ([]*AWSAccount, error) {
 		return nil, errors.Wrap(err, "failed to build document from response")
 	}
 
-	doc.Find("fieldset > div.saml-account").Each(func(i int, s *goquery.Selection) {
-		account := new(AWSAccount)
-		account.Name = s.Find("div.saml-account-name").Text()
-		s.Find("label").Each(func(i int, s *goquery.Selection) {
-			role := new(AWSRole)
-			role.Name = s.Text()
-			role.RoleARN, _ = s.Attr("for")
-			account.Roles = append(account.Roles, role)
-		})
-		accounts = append(accounts, account)
-	})
+	b64data, ok := doc.Find("meta[name=data]").Attr("content")
+	if !ok {
+		return nil, errors.New("failed to find meta[name=data] in AWS response")
+	}
+	
+	// decode the base64 encoded data
+	data, err = base64.StdEncoding.DecodeString(b64data)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to decode base64 data")
+	}
+	
+	type dataResponse struct {
+		InvalidAccounts struct{}            `json:"invalid_accounts"`
+		RelayState      any                 `json:"RelayState"`
+		Name            any                 `json:"name"`
+		RolesAccounts   map[string][]string `json:"roles_accounts"`
+		ForeignAccounts struct{}            `json:"foreign_accounts"`
+		Region          string              `json:"region"`
+		Portal          any                 `json:"portal"`
+		Problems        string              `json:"problems"`
+		Policy          any                 `json:"policy"`
+	}
+	
+	dr := &dataResponse{}
+	if err := json.Unmarshal(data, dr); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal data")
+	}
+	
+	// for each account map to our structure
+	for account, roles := range dr.RolesAccounts {
+		name := strings.TrimSpace(strings.Split(account, "(")[0])
+	
+		awsAccount := &AWSAccount{
+			Name: name,
+		}
+	
+		for _, role := range roles {
+			awsRole := &AWSRole{
+				Name:    role,
+				RoleARN: role,
+			}
+	
+			awsAccount.Roles = append(awsAccount.Roles, awsRole)
+		}
+	
+		accounts = append(accounts, awsAccount)
+	}
 
 	return accounts, nil
 }
